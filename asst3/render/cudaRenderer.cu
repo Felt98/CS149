@@ -15,7 +15,7 @@
 #include "util.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////
-// Putting all the cuda kernels here
+// Putting all the cuda kernels here 修改最后的render()和kernelRenderCircles()
 ///////////////////////////////////////////////////////////////////////////////////////
 
 struct GlobalConstants {
@@ -394,8 +394,8 @@ __global__ void kernelRenderCircles() {
     int index3 = 3 * index;
 
     // read position and radius
-    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-    float  rad = cuConstRendererParams.radius[index];
+    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);     //圆中心点坐标
+    float  rad = cuConstRendererParams.radius[index];                   //圆半径
 
     // compute the bounding box of the circle. The bound is in integer
     // screen coordinates, so it's clamped to the edges of the screen.
@@ -416,18 +416,63 @@ __global__ void kernelRenderCircles() {
     float invHeight = 1.f / imageHeight;
 
     // for all pixels in the bonding box
-    //这里的问题：1.圆之间是有重叠的，每个线程执行shadePixel很可能会读写同一像素点，造成数据竞争。2.不能保证按照圆输入次序进行渲染
+    //这里的问题：1.只在圆之间并行，即每个圆分配一个线程，但是圆之间是有重叠的，多个线程执行shadePixel很可能会读写同一像素点，造成数据竞争。2.不能保证按照圆输入次序进行渲染
     for (int pixelY=screenMinY; pixelY<screenMaxY; pixelY++) {
         float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + screenMinX)]);
         for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
             float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));
+                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));  //像素中心的标准化坐标
+            //shadePixel函数用来计算当前圆index对当前像素的颜色和透明度贡献
             shadePixel(index, pixelCenterNorm, p, imgPtr);
             imgPtr++;
         }
     }
 }
 
+/*方法1：给每个像素点分配一个线程
+思路：在kernel函数中每个线程计算一个像素点的标准化中心位置，然后固定像素点遍历每个圆，计算每个圆对该像素点的贡献（shadePixel自带对像素位置在不在圆内的判断）
+    需要的线程数：X为imageWidth个，Y为imageHeight个
+*/
+__global__ void kernelRenderPixel() {
+    for (int circleIndex=0; circleIndex<numCircles; circleIndex++) {
+        int index3 = 3 * circleIndex;
+
+        // read position and radius
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);     //圆中心点坐标
+        float  rad = cuConstRendererParams.radius[circleIndex];                   //圆半径
+
+        // compute the bounding box of the circle. The bound is in integer
+        // screen coordinates, so it's clamped to the edges of the screen.
+        short imageWidth = cuConstRendererParams.imageWidth;
+        short imageHeight = cuConstRendererParams.imageHeight;
+        short minX = static_cast<short>(imageWidth * (p.x - rad));
+        short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
+        short minY = static_cast<short>(imageHeight * (p.y - rad));
+        short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
+
+        // a bunch of clamps.  Is there a CUDA built-in for this?
+        short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
+        short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
+        short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
+        short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
+
+        float invWidth = 1.f / imageWidth;
+        float invHeight = 1.f / imageHeight;
+
+        // for all pixels in the bonding box
+        //这里的问题：1.只在圆之间并行，即每个圆分配一个线程，但是圆之间是有重叠的，多个线程执行shadePixel很可能会读写同一像素点，造成数据竞争。2.不能保证按照圆输入次序进行渲染
+        for (int pixelY=screenMinY; pixelY<screenMaxY; pixelY++) {
+            float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + screenMinX)]);
+            for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
+                float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                                    invHeight * (static_cast<float>(pixelY) + 0.5f));  //像素中心的标准化坐标
+                //shadePixel函数用来计算当前圆index对当前像素的颜色和透明度贡献
+                shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
+                imgPtr++;
+            }
+        }
+    }
+}
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -639,7 +684,7 @@ CudaRenderer::render() {
 
     // 256 threads per block is a healthy number
     dim3 blockDim(256, 1);
-    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);   //分配numCircles个线程
 
     kernelRenderCircles<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();

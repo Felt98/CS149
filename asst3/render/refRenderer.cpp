@@ -378,6 +378,7 @@ RefRenderer::render() {
 
         // convert normalized coordinate bounds to integer screen
         // pixel bounds.  Clamp to the edges of the screen.
+        //计算圆在 x 方向和Y方向的边界范围
         int screenMinX = CLAMP(static_cast<int>(minX * image->width), 0, image->width);
         int screenMaxX = CLAMP(static_cast<int>(maxX * image->width)+1, 0, image->width);
         int screenMinY = CLAMP(static_cast<int>(minY * image->height), 0, image->height);
